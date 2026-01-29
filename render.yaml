@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: career-counselor-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn rag_api:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: JSEARCH_API_KEY
+        sync: false
