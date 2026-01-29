@@ -32,12 +32,16 @@ def get_embedding(text):
     if cache_key in embedding_cache:
         return embedding_cache[cache_key]
     
-    # Use Pinecone inference API
+    # Use Pinecone inference API with llama-text-embed-v2 at 384 dimensions
+    # (matches our existing Pinecone index which uses 384-dim vectors)
     try:
         response = pc.inference.embed(
-            model="multilingual-e5-large",
+            model="llama-text-embed-v2",
             inputs=[text],
-            parameters={"input_type": "query"}
+            parameters={
+                "input_type": "query",
+                "dimension": 384  # Match existing index dimension
+            }
         )
         embedding = response.data[0].values
         embedding_cache[cache_key] = embedding
