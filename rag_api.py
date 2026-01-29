@@ -2,43 +2,59 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 import PyPDF2
 import io
 import base64
 import requests
+import hashlib
 
 app = Flask(__name__)
 CORS(app)
 
-# Get API keys from environment variables (for production)
-# Falls back to hardcoded values for local development
+# Get API keys from environment variables
 PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY', 'pcsk_1qJBT_DNs7D7rc6kZRA5rV1jn4CB6R4QjiaJSh1x987DACmgRZkhPpAipUScDCEWwTppv')
 JSEARCH_API_KEY = os.environ.get('JSEARCH_API_KEY', '83d8d51b2emsh7752ed56cb2e48ep16f6dcjsndc2626e54409')
 JSEARCH_HOST = "jsearch.p.rapidapi.com"
 
-# Initialize Pinecone and model once at startup
-print("Loading embedding model...")
+# Initialize Pinecone
+print("Initializing Pinecone...")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("career-guidance")
-model = SentenceTransformer('all-MiniLM-L6-v2')
-print("Model loaded! API ready.")
+print("Pinecone ready!")
+
+# Simple embedding cache to avoid repeated API calls
+embedding_cache = {}
+
+def get_embedding(text):
+    """Get embedding using Pinecone's inference API"""
+    # Check cache first
+    cache_key = hashlib.md5(text.encode()).hexdigest()
+    if cache_key in embedding_cache:
+        return embedding_cache[cache_key]
+    
+    # Use Pinecone inference API
+    try:
+        response = pc.inference.embed(
+            model="multilingual-e5-large",
+            inputs=[text],
+            parameters={"input_type": "query"}
+        )
+        embedding = response.data[0].values
+        embedding_cache[cache_key] = embedding
+        return embedding
+    except Exception as e:
+        print(f"Embedding error: {e}")
+        # Fallback: return None and skip vector search
+        return None
 
 # Common tech skills to look for in resumes
 KNOWN_SKILLS = [
-    # Programming Languages
     "python", "java", "javascript", "typescript", "c++", "c#", "go", "rust", "ruby", "php", "swift", "kotlin", "r", "scala", "matlab",
-    # ML/AI
     "tensorflow", "pytorch", "keras", "scikit-learn", "pandas", "numpy", "opencv", "hugging face", "transformers", "deep learning", "machine learning", "neural networks", "nlp", "computer vision", "reinforcement learning",
-    # Data
     "sql", "mysql", "postgresql", "mongodb", "redis", "elasticsearch", "spark", "hadoop", "kafka", "airflow", "dbt", "snowflake", "bigquery", "data warehousing", "etl",
-    # Cloud & DevOps
     "aws", "azure", "gcp", "google cloud", "docker", "kubernetes", "terraform", "jenkins", "ci/cd", "github actions", "linux", "bash",
-    # Web
     "react", "angular", "vue", "node.js", "express", "django", "flask", "fastapi", "rest api", "graphql", "html", "css",
-    # Tools
     "git", "jira", "confluence", "tableau", "power bi", "excel", "jupyter",
-    # Soft Skills
     "communication", "leadership", "teamwork", "problem solving", "agile", "scrum"
 ]
 
@@ -54,8 +70,15 @@ def search():
         if not query:
             return jsonify({'error': 'No query provided'}), 400
         
-        # Create embedding
-        query_embedding = model.encode(query).tolist()
+        # Get embedding
+        query_embedding = get_embedding(query)
+        
+        if query_embedding is None:
+            return jsonify({
+                'query': query,
+                'results': [],
+                'error': 'Could not generate embedding'
+            })
         
         # Search Pinecone
         results = index.query(
@@ -89,8 +112,6 @@ def extract_resume():
     """Extract text and skills from uploaded PDF resume"""
     try:
         data = request.json
-        
-        # Get base64 encoded PDF
         pdf_base64 = data.get('pdf_base64', '')
         
         if not pdf_base64:
@@ -141,13 +162,17 @@ def analyze_skills():
         user_skills = data.get('user_skills', [])
         target_career = data.get('target_career', 'Machine Learning Engineer')
         
+        # Get embedding for career search
+        query_embedding = get_embedding(target_career)
+        
+        if query_embedding is None:
+            return jsonify({'error': 'Could not generate embedding'}), 500
+        
         # Search for the target career in Pinecone
-        query_embedding = model.encode(target_career).tolist()
         results = index.query(
             vector=query_embedding,
             top_k=3,
-            include_metadata=True,
-            filter={"type": "career"}
+            include_metadata=True
         )
         
         # Extract required skills from career data
@@ -157,14 +182,12 @@ def analyze_skills():
         for match in results['matches']:
             text = match['metadata'].get('text', '')
             
-            # Parse skills from the career text
             if 'Technical Skills Required:' in text:
                 skills_section = text.split('Technical Skills Required:')[1]
                 skills_section = skills_section.split('\n')[0]
                 skills = [s.strip() for s in skills_section.split(',')]
                 required_skills.extend(skills)
             
-            # Get career info
             if match['metadata'].get('type') == 'career':
                 career_info = {
                     'title': match['metadata'].get('title', target_career),
@@ -174,7 +197,6 @@ def analyze_skills():
         
         # Normalize skills for comparison
         user_skills_lower = [s.lower().strip() for s in user_skills]
-        required_skills_lower = [s.lower().strip() for s in required_skills]
         
         # Find matches and gaps
         skills_have = []
@@ -186,7 +208,6 @@ def analyze_skills():
             else:
                 skills_need.append(skill)
         
-        # Remove duplicates
         skills_have = list(set(skills_have))
         skills_need = list(set(skills_need))
         
@@ -212,12 +233,10 @@ def search_jobs():
         location = data.get('location', '')
         num_results = data.get('num_results', 5)
         
-        # Build search query
         search_query = query
         if location:
             search_query = f"{query} in {location}"
         
-        # Call JSearch API
         url = "https://jsearch.p.rapidapi.com/search"
         
         headers = {
@@ -230,7 +249,7 @@ def search_jobs():
             "page": "1",
             "num_pages": "1",
             "country": "us",
-            "date_posted": "month"  # Jobs posted in last month
+            "date_posted": "month"
         }
         
         response = requests.get(url, headers=headers, params=params)
@@ -244,7 +263,6 @@ def search_jobs():
         
         result = response.json()
         
-        # Format job results
         jobs = []
         for job in result.get('data', [])[:num_results]:
             jobs.append({
@@ -297,7 +315,7 @@ def home():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     print("\n" + "="*50)
-    print("Career Guidance RAG API")
+    print("Career Guidance RAG API (Lite)")
     print("="*50)
     print("Endpoints:")
     print("  POST /search         - Search career database")
